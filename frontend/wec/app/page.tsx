@@ -1,6 +1,7 @@
 "use client";
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import Image from "next/image";
+import { formatUnits, isAddress } from "ethers";
 import {
   Wallet,
   ArrowRight,
@@ -8,10 +9,30 @@ import {
   Zap,
   Coins,
   ChevronRight,
-  CheckCircle2,
 } from "lucide-react";
+import {
+  approve,
+  connectWallet,
+  debtValue,
+  freeWithdraw,
+  getAllowance,
+  getRequiredPaymentAmount,
+  getWalletBalances,
+  isFreeWallet,
+  parseTokenAmount,
+  payDebt,
+  PRESALE_ADDRESS,
+  TOKEN_ADDRESSES,
+  swap,
+  type WalletBalances,
+} from "../services/Web3Service";
 
-const Navbar = ({ isConnected, onConnect }: any) => (
+interface NavbarProps {
+  account: string | null;
+  onConnect: () => Promise<void>;
+}
+
+const Navbar = ({ account, onConnect }: NavbarProps) => (
   <nav className="sticky top-0 z-50 w-full bg-[#FFF8F3]/90 backdrop-blur-md border-b border-gray-200">
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
       <div className="flex justify-between items-center h-20">
@@ -30,13 +51,13 @@ const Navbar = ({ isConnected, onConnect }: any) => (
         {/* Connect Wallet Button */}
         <div>
           <button
-            onClick={onConnect}
+            onClick={() => void onConnect()}
             className="flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-full font-medium hover:bg-gray-800 transition-all duration-200 shadow-md active:scale-95"
           >
-            {isConnected ? (
+            {account ? (
               <>
                 <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse mr-1"></div>
-                0x4A...2f9B
+                {`${account.slice(0, 6)}...${account.slice(-4)}`}
               </>
             ) : (
               <>
@@ -52,9 +73,34 @@ const Navbar = ({ isConnected, onConnect }: any) => (
   </nav>
 );
 
-const PresaleCard = () => {
+type PaymentToken = "USDT" | "USDC";
+
+interface PresaleCardProps {
+  account: string | null;
+  balances: WalletBalances | null;
+  error: string;
+  onConnect: () => Promise<void>;
+  onRefreshBalances: () => Promise<void>;
+}
+
+const PresaleCard = ({
+  account,
+  balances,
+  error,
+  onConnect,
+  onRefreshBalances,
+}: PresaleCardProps) => {
   const [wecAmount, setWecAmount] = useState("");
   const [usdCost, setUsdCost] = useState(0);
+  const [sufficientAllowance, setSufficientAllowance] = useState({
+    USDT: false,
+    USDC: false,
+  });
+  const [processing, setProcessing] = useState<PaymentToken | null>(null);
+  const [processingAction, setProcessingAction] = useState<
+    "approve" | "swap" | null
+  >(null);
+  const [transactionError, setTransactionError] = useState("");
   const WEC_PRICE = 0.01;
 
   const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -62,25 +108,102 @@ const PresaleCard = () => {
     if (val === "" || Number(val) >= 0) {
       setWecAmount(val);
       setUsdCost(val === "" ? 0 : Number(val) * WEC_PRICE);
+      setSufficientAllowance({ USDT: false, USDC: false });
+      setTransactionError("");
     }
   };
 
-  const handlePurchase = (currency: any) => {
-    if (!wecAmount || Number(wecAmount) <= 0) {
-      alert("Please enter a valid amount of WEC.");
+  useEffect(() => {
+    if (!account || !wecAmount || Number(wecAmount) <= 0) {
+      setSufficientAllowance({ USDT: false, USDC: false });
       return;
     }
-    // In a real app, this would trigger a smart contract transaction
-    console.log(
-      `Initiating purchase of ${wecAmount} WEC with ${currency}. Total cost: $${usdCost.toFixed(
-        2,
-      )}`,
-    );
-    alert(
-      `Mock Transaction Started: Buying ${wecAmount} WEC for $${usdCost.toFixed(
-        2,
-      )} ${currency}`,
-    );
+
+    let isCurrent = true;
+    const checkAllowances = async () => {
+      try {
+        const requiredAmount = await getRequiredPaymentAmount(wecAmount);
+        const [usdtAllowance, usdcAllowance] = await Promise.all([
+          getAllowance(TOKEN_ADDRESSES.USDT, PRESALE_ADDRESS, account),
+          getAllowance(TOKEN_ADDRESSES.USDC, PRESALE_ADDRESS, account),
+        ]);
+        if (isCurrent) {
+          setSufficientAllowance({
+            USDT: usdtAllowance >= requiredAmount,
+            USDC: usdcAllowance >= requiredAmount,
+          });
+        }
+      } catch {
+        if (isCurrent) {
+          setSufficientAllowance({ USDT: false, USDC: false });
+        }
+      }
+    };
+
+    void checkAllowances();
+    return () => {
+      isCurrent = false;
+    };
+  }, [account, wecAmount]);
+
+  const handlePurchase = async (currency: PaymentToken) => {
+    if (
+      !wecAmount ||
+      !Number.isFinite(Number(wecAmount)) ||
+      Number(wecAmount) <= 0
+    ) {
+      setTransactionError("Informe uma quantidade válida de WECR.");
+      return;
+    }
+
+    if (!account) {
+      await onConnect();
+      return;
+    }
+
+    setProcessing(currency);
+    setTransactionError("");
+    try {
+      const requiredAmount = await getRequiredPaymentAmount(wecAmount);
+      const tokenAddress = TOKEN_ADDRESSES[currency];
+      const allowance = await getAllowance(
+        tokenAddress,
+        PRESALE_ADDRESS,
+        account,
+      );
+
+      if (allowance < requiredAmount) {
+        setProcessingAction("approve");
+        await approve(tokenAddress, PRESALE_ADDRESS, requiredAmount);
+        const updatedAllowance = await getAllowance(
+          tokenAddress,
+          PRESALE_ADDRESS,
+          account,
+        );
+        setSufficientAllowance((current) => ({
+          ...current,
+          [currency]: updatedAllowance >= requiredAmount,
+        }));
+        return;
+      }
+
+      setProcessingAction("swap");
+      await swap(wecAmount, currency === "USDT");
+      setSufficientAllowance((current) => ({
+        ...current,
+        [currency]: false,
+      }));
+      await onRefreshBalances();
+    } catch (purchaseError) {
+      setTransactionError(
+        purchaseError instanceof Error
+          ? purchaseError.message
+          : "A transação falhou. Tente novamente.",
+      );
+    } finally {
+      setProcessing(null);
+      setProcessingAction(null);
+    }
   };
 
   return (
@@ -92,7 +215,7 @@ const PresaleCard = () => {
         <div className="flex justify-between items-start mb-6">
           <div>
             <h2 className="text-2xl font-bold text-black mb-1">
-              Buy WEC Token
+              Buy WECR Token
             </h2>
             <p className="text-gray-500 text-sm font-medium">
               Join the exclusive presale
@@ -118,7 +241,7 @@ const PresaleCard = () => {
         <div className="space-y-4 mb-8">
           <div>
             <label className="block text-sm font-semibold text-gray-700 mb-2">
-              Amount (WEC)
+              Amount (WECR)
             </label>
             <div className="relative">
               <input
@@ -128,7 +251,7 @@ const PresaleCard = () => {
                 placeholder="0"
                 className="w-full bg-gray-50 border border-gray-200 text-black text-lg rounded-xl px-4 py-3.5 focus:outline-none focus:ring-2 focus:ring-black focus:border-transparent transition-all"
               />
-              <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-2">
+              <div className="absolute right-8 top-1/2 -translate-y-1/2 flex items-center gap-2">
                 <div className="w-6 h-6 bg-black rounded-full flex items-center justify-center">
                   <span className="text-[#FFF8F3] font-bold text-xs">W</span>
                 </div>
@@ -162,11 +285,20 @@ const PresaleCard = () => {
         {/* Action Buttons */}
         <div className="grid grid-cols-2 gap-4">
           <button
-            onClick={() => handlePurchase("USDT")}
-            className="group flex flex-col items-center justify-center bg-black text-white rounded-xl py-3 px-4 hover:bg-gray-800 transition-all duration-200 active:scale-95 shadow-md"
+            onClick={() => void handlePurchase("USDT")}
+            disabled={processing !== null || Number(wecAmount) <= 0}
+            className="group flex flex-col items-center justify-center bg-black text-white rounded-xl py-3 px-4 hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200 active:scale-95 shadow-md"
           >
             <span className="text-xs text-gray-400 font-medium mb-1">
-              Buy with
+              {processing === "USDT"
+                ? processingAction === "approve"
+                  ? "Approving..."
+                  : "Swapping..."
+                : !account
+                ? "Connect wallet"
+                : sufficientAllowance.USDT
+                ? "Swap with"
+                : "Approve"}
             </span>
             <span className="inline-flex items-center gap-2 font-bold text-lg group-hover:text-green-400 transition-colors">
               <Image
@@ -180,11 +312,20 @@ const PresaleCard = () => {
             </span>
           </button>
           <button
-            onClick={() => handlePurchase("USDC")}
-            className="group flex flex-col items-center justify-center bg-black text-white rounded-xl py-3 px-4 hover:bg-gray-800 transition-all duration-200 active:scale-95 shadow-md"
+            onClick={() => void handlePurchase("USDC")}
+            disabled={processing !== null || Number(wecAmount) <= 0}
+            className="group flex flex-col items-center justify-center bg-black text-white rounded-xl py-3 px-4 hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200 active:scale-95 shadow-md"
           >
             <span className="text-xs text-gray-400 font-medium mb-1">
-              Buy with
+              {processing === "USDC"
+                ? processingAction === "approve"
+                  ? "Approving..."
+                  : "Swapping..."
+                : !account
+                ? "Connect wallet"
+                : sufficientAllowance.USDC
+                ? "Swap with"
+                : "Approve"}
             </span>
             <span className="inline-flex items-center gap-2 font-bold text-lg group-hover:text-blue-400 transition-colors">
               <Image
@@ -199,15 +340,42 @@ const PresaleCard = () => {
           </button>
         </div>
 
+        <div className="mt-4 grid grid-cols-3 divide-x divide-gray-200 rounded-xl border border-gray-200 bg-gray-50 py-3 text-center">
+          {[
+            { symbol: "USDT", amount: balances?.usdt },
+            { symbol: "USDC", amount: balances?.usdc },
+            { symbol: "WECR", amount: balances?.wecr },
+          ].map(({ symbol, amount }) => (
+            <div key={symbol} className="min-w-0 px-2">
+              <div className="text-xs font-semibold text-gray-500">
+                {symbol}
+              </div>
+              <div className="mt-1 truncate text-sm font-bold text-black">
+                {amount ?? "--"}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {(transactionError || error) && (
+          <p role="alert" className="mt-3 text-center text-sm text-red-600">
+            {transactionError || error}
+          </p>
+        )}
+
         <p className="text-center text-xs text-gray-400 mt-5">
-          Transactions are secured and encrypted.
+          {account
+            ? "Transactions on the Polygon network"
+            : "Connect your wallet to view your balances and purchase tokens."}
         </p>
       </div>
     </div>
   );
 };
 
-const Hero = () => (
+type HeroProps = PresaleCardProps;
+
+const Hero = (props: HeroProps) => (
   <div className="relative pt-20 pb-32 overflow-hidden">
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
       <div className="lg:grid lg:grid-cols-12 lg:gap-16 items-center">
@@ -271,13 +439,424 @@ const Hero = () => (
         {/* Presale Box */}
         <div className="lg:col-span-6 relative">
           <div className="absolute inset-0 bg-gradient-to-tr from-gray-200 to-white rounded-[2.5rem] transform rotate-3 scale-105 opacity-50 blur-lg"></div>
-          <PresaleCard />
+          <PresaleCard {...props} />
         </div>
       </div>
     </div>
   </div>
 );
 
+interface DebtManagementProps {
+  account: string | null;
+  refreshKey: number;
+  onRefreshBalances: () => Promise<void>;
+  onRefreshDebt: () => void;
+}
+
+const DebtManagement = ({
+  account,
+  refreshKey,
+  onRefreshBalances,
+  onRefreshDebt,
+}: DebtManagementProps) => {
+  const [debt, setDebt] = useState("0");
+  const [debtLoading, setDebtLoading] = useState(false);
+  const [paymentAmount, setPaymentAmount] = useState("");
+  const [allowances, setAllowances] = useState({ USDT: false, USDC: false });
+  const [processing, setProcessing] = useState<PaymentToken | null>(null);
+  const [processingAction, setProcessingAction] = useState<
+    "approve" | "payDebt" | null
+  >(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!account) {
+      setDebt("0");
+      return;
+    }
+
+    let isCurrent = true;
+    setDebtLoading(true);
+    void debtValue(account)
+      .then((value) => {
+        if (isCurrent) setDebt(formatUnits(value, 18));
+      })
+      .catch((debtError) => {
+        if (isCurrent) {
+          setError(
+            debtError instanceof Error
+              ? debtError.message
+              : "Não foi possível consultar a dívida.",
+          );
+        }
+      })
+      .finally(() => {
+        if (isCurrent) setDebtLoading(false);
+      });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [account, refreshKey]);
+
+  useEffect(() => {
+    if (
+      !account ||
+      !paymentAmount ||
+      !Number.isFinite(Number(paymentAmount)) ||
+      Number(paymentAmount) <= 0
+    ) {
+      setAllowances({ USDT: false, USDC: false });
+      return;
+    }
+
+    let isCurrent = true;
+    const checkAllowances = async () => {
+      try {
+        const [usdtAmount, usdcAmount] = await Promise.all([
+          parseTokenAmount(TOKEN_ADDRESSES.USDT, paymentAmount),
+          parseTokenAmount(TOKEN_ADDRESSES.USDC, paymentAmount),
+        ]);
+        const [usdtAllowance, usdcAllowance] = await Promise.all([
+          getAllowance(TOKEN_ADDRESSES.USDT, PRESALE_ADDRESS, account),
+          getAllowance(TOKEN_ADDRESSES.USDC, PRESALE_ADDRESS, account),
+        ]);
+        if (isCurrent) {
+          setAllowances({
+            USDT: usdtAllowance >= usdtAmount,
+            USDC: usdcAllowance >= usdcAmount,
+          });
+        }
+      } catch {
+        if (isCurrent) setAllowances({ USDT: false, USDC: false });
+      }
+    };
+
+    void checkAllowances();
+    return () => {
+      isCurrent = false;
+    };
+  }, [account, paymentAmount]);
+
+  const handlePayDebt = async (currency: PaymentToken) => {
+    if (
+      !paymentAmount ||
+      !Number.isFinite(Number(paymentAmount)) ||
+      Number(paymentAmount) <= 0
+    ) {
+      setError("Informe um valor válido para pagar.");
+      return;
+    }
+
+    if (!account) return;
+
+    setProcessing(currency);
+    setError("");
+    try {
+      const tokenAddress = TOKEN_ADDRESSES[currency];
+      const amount = await parseTokenAmount(tokenAddress, paymentAmount);
+      const allowance = await getAllowance(
+        tokenAddress,
+        PRESALE_ADDRESS,
+        account,
+      );
+
+      if (allowance < amount) {
+        setProcessingAction("approve");
+        await approve(tokenAddress, PRESALE_ADDRESS, amount);
+        const updatedAllowance = await getAllowance(
+          tokenAddress,
+          PRESALE_ADDRESS,
+          account,
+        );
+        setAllowances((current) => ({
+          ...current,
+          [currency]: updatedAllowance >= amount,
+        }));
+        return;
+      }
+
+      setProcessingAction("payDebt");
+      await payDebt(paymentAmount, currency === "USDT");
+      setPaymentAmount("");
+      setAllowances({ USDT: false, USDC: false });
+      onRefreshDebt();
+      await onRefreshBalances();
+    } catch (paymentError) {
+      setError(
+        paymentError instanceof Error
+          ? paymentError.message
+          : "Não foi possível pagar a dívida.",
+      );
+    } finally {
+      setProcessing(null);
+      setProcessingAction(null);
+    }
+  };
+
+  if (!account) return null;
+
+  return (
+    <>
+      <div className="min-w-0 rounded-2xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5">
+        <h3 className="text-base font-bold text-black">Account debt</h3>
+        <p className="mt-0.5 text-xs text-gray-500">Pending balance</p>
+        <div className="mt-5 flex items-baseline gap-2 border-t border-gray-100 pt-4">
+          <div className="truncate text-2xl font-bold text-black">
+            {debtLoading ? "..." : debt}
+          </div>
+          <div className="text-xs font-semibold text-gray-500">WECR</div>
+        </div>
+      </div>
+
+      <div className="min-w-0 rounded-2xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5">
+        <h3 className="text-base font-bold text-black">Pay debt</h3>
+        <p className="mt-0.5 text-xs text-gray-500">Pay with USDT or USDC.</p>
+        <p className="mt-2 text-xs font-medium text-gray-600">
+          WECR deducted: {(Number(paymentAmount) / 0.01).toLocaleString()}
+        </p>
+        <label
+          htmlFor="debt-payment-amount"
+          className="mb-1.5 mt-3 block text-xs font-semibold text-gray-700"
+        >
+          Amount to pay (USD)
+        </label>
+        <input
+          id="debt-payment-amount"
+          type="number"
+          min="0"
+          step="any"
+          value={paymentAmount}
+          onChange={(event) => {
+            setPaymentAmount(event.target.value);
+            setError("");
+          }}
+          placeholder="0.00"
+          className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 text-sm text-black focus:border-transparent focus:outline-none focus:ring-2 focus:ring-black"
+        />
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          {(["USDT", "USDC"] as const).map((currency) => (
+            <button
+              key={currency}
+              type="button"
+              onClick={() => void handlePayDebt(currency)}
+              disabled={processing !== null || debtLoading}
+              className="flex min-h-11 items-center justify-center gap-1.5 rounded-lg bg-black px-2 py-2 font-bold text-white transition-colors hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Image
+                src={`/images/${currency.toLowerCase()}.jpg`}
+                alt={`Logo ${currency}`}
+                width={20}
+                height={20}
+                className="h-5 w-5 rounded-full object-cover"
+              />
+              <span className="text-left">
+                <span className="block text-[10px] font-medium leading-tight text-gray-300">
+                  {processing === currency
+                    ? processingAction === "approve"
+                      ? "Approving..."
+                      : "Paying debt..."
+                    : allowances[currency]
+                    ? "Pay debt"
+                    : "Approve"}
+                </span>
+                {currency}
+              </span>
+            </button>
+          ))}
+        </div>
+        {error && (
+          <p role="alert" className="mt-2 text-xs text-red-600">
+            {error}
+          </p>
+        )}
+      </div>
+    </>
+  );
+};
+
+interface FreeWalletWithdrawProps {
+  account: string | null;
+  onRefreshBalances: () => Promise<void>;
+  onRefreshDebt: () => void;
+}
+
+const FreeWalletWithdraw = ({
+  account,
+  onRefreshBalances,
+  onRefreshDebt,
+}: FreeWalletWithdrawProps) => {
+  const [to, setTo] = useState("");
+  const [amount, setAmount] = useState("");
+  const [processing, setProcessing] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setTo(account ?? "");
+    setAmount("");
+    setError("");
+  }, [account]);
+
+  const handleWithdraw = async () => {
+    const destination = to.trim();
+
+    if (!isAddress(destination)) {
+      setError("Please enter a valid destination address.");
+      return;
+    }
+    if (!amount || !Number.isFinite(Number(amount)) || Number(amount) <= 0) {
+      setError("Please enter a valid WECR amount.");
+      return;
+    }
+
+    setProcessing(true);
+    setError("");
+    try {
+      await freeWithdraw(destination, amount);
+      setAmount("");
+      onRefreshDebt();
+      await onRefreshBalances();
+    } catch (withdrawError) {
+      setError(
+        withdrawError instanceof Error
+          ? withdrawError.message
+          : "Withdrawal failed. Please try again.",
+      );
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  if (!account) return null;
+
+  return (
+    <div className="min-w-0 rounded-2xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5">
+      <h3 className="text-base font-bold text-black">Free withdrawal</h3>
+      <p className="mt-0.5 text-xs text-gray-500">Send WECR to an address.</p>
+
+      <div className="mt-4 space-y-3">
+        <div>
+          <label
+            htmlFor="free-withdraw-to"
+            className="mb-1.5 block text-xs font-semibold text-gray-700"
+          >
+            Destination Address
+          </label>
+          <input
+            id="free-withdraw-to"
+            type="text"
+            value={to}
+            onChange={(e) => setTo(e.target.value)}
+            placeholder="0x..."
+            className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 text-sm text-black focus:border-transparent focus:outline-none focus:ring-2 focus:ring-black"
+          />
+        </div>
+
+        <div>
+          <label
+            htmlFor="free-withdraw-amount"
+            className="mb-1.5 block text-xs font-semibold text-gray-700"
+          >
+            Amount (WECR)
+          </label>
+          <div className="relative">
+            <input
+              id="free-withdraw-amount"
+              type="number"
+              min="0"
+              step="any"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="0"
+              className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 text-sm text-black focus:border-transparent focus:outline-none focus:ring-2 focus:ring-black"
+            />
+          </div>
+        </div>
+
+        {error && (
+          <div
+            role="alert"
+            className="rounded-lg border border-red-100 bg-red-50 p-2"
+          >
+            <p className="text-center text-xs font-medium text-red-600">
+              {error}
+            </p>
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={() => void handleWithdraw()}
+          disabled={processing}
+          className="mt-1 flex w-full items-center justify-center gap-2 rounded-lg bg-black px-3 py-3 text-sm font-bold text-white transition-colors hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {processing ? "Processing..." : "Withdraw"}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+interface FreeWalletSessionProps {
+  account: string | null;
+  refreshKey: number;
+  onRefreshBalances: () => Promise<void>;
+  onRefreshDebt: () => void;
+}
+
+const FreeWalletSession = ({
+  account,
+  refreshKey,
+  onRefreshBalances,
+  onRefreshDebt,
+}: FreeWalletSessionProps) => {
+  const [isFree, setIsFree] = useState(false);
+
+  useEffect(() => {
+    setIsFree(false);
+    if (!account) return;
+
+    let isCurrent = true;
+    void isFreeWallet(account)
+      .then((result) => {
+        if (isCurrent) setIsFree(result);
+      })
+      .catch(() => {
+        if (isCurrent) setIsFree(false);
+      });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [account]);
+
+  if (!account || !isFree) return null;
+
+  return (
+    <section className="mx-auto max-w-7xl px-4 pb-10 sm:px-6 lg:px-8">
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="text-sm font-bold text-gray-800">Free wallet</h2>
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700">
+          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+          Authorized
+        </span>
+      </div>
+      <div className="grid grid-cols-1 items-stretch gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <DebtManagement
+          account={account}
+          refreshKey={refreshKey}
+          onRefreshBalances={onRefreshBalances}
+          onRefreshDebt={onRefreshDebt}
+        />
+        <FreeWalletWithdraw
+          account={account}
+          onRefreshBalances={onRefreshBalances}
+          onRefreshDebt={onRefreshDebt}
+        />
+      </div>
+    </section>
+  );
+};
 const About = () => (
   <div id="about" className="bg-white py-24 border-t border-gray-100">
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -362,18 +941,54 @@ const Footer = () => (
 );
 
 export default function App() {
-  const [isConnected, setIsConnected] = useState(false);
+  const [account, setAccount] = useState<string | null>(null);
+  const [balances, setBalances] = useState<WalletBalances | null>(null);
+  const [walletError, setWalletError] = useState("");
+  const [debtRefreshKey, setDebtRefreshKey] = useState(0);
 
-  const handleConnect = () => {
-    // Mock wallet connection toggle
-    setIsConnected(!isConnected);
+  const handleConnect = async () => {
+    try {
+      setWalletError("");
+      const wallet = await connectWallet();
+      if (wallet.chainId !== 80002) {
+        throw new Error("Mude a carteira para a rede Polygon Amoy.");
+      }
+      setAccount(wallet.address);
+      setBalances(await getWalletBalances(wallet.address));
+    } catch (connectionError) {
+      setWalletError(
+        connectionError instanceof Error
+          ? connectionError.message
+          : "Não foi possível conectar a carteira.",
+      );
+    }
+  };
+
+  const handleRefreshBalances = async () => {
+    if (account) setBalances(await getWalletBalances(account));
+  };
+
+  const handleRefreshDebt = () => {
+    setDebtRefreshKey((current) => current + 1);
   };
 
   return (
     <div className="min-h-screen bg-[#FFF8F3] font-sans selection:bg-black selection:text-[#FFF8F3]">
-      <Navbar isConnected={isConnected} onConnect={handleConnect} />
+      <Navbar account={account} onConnect={handleConnect} />
       <main>
-        <Hero />
+        <Hero
+          account={account}
+          balances={balances}
+          error={walletError}
+          onConnect={handleConnect}
+          onRefreshBalances={handleRefreshBalances}
+        />
+        <FreeWalletSession
+          account={account}
+          refreshKey={debtRefreshKey}
+          onRefreshBalances={handleRefreshBalances}
+          onRefreshDebt={handleRefreshDebt}
+        />
         <About />
       </main>
       <Footer />
