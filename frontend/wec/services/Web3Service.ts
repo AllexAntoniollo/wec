@@ -32,8 +32,37 @@ export async function connectWallet() {
   }
 
   provider = new ethers.BrowserProvider(window.ethereum);
+  const chainIdHex = ethers.toQuantity(AMOY_CHAIN_ID);
 
-  // Solicita permissão ao usuário
+  try {
+    await provider.send("wallet_switchEthereumChain", [
+      { chainId: chainIdHex },
+    ]);
+  } catch (switchError) {
+    const errorCode =
+      typeof switchError === "object" &&
+      switchError !== null &&
+      "code" in switchError
+        ? switchError.code
+        : undefined;
+
+    if (errorCode !== 4902) throw switchError;
+
+    await provider.send("wallet_addEthereumChain", [
+      {
+        chainId: chainIdHex,
+        chainName: "Polygon Amoy",
+        nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
+        rpcUrls: ["https://rpc-amoy.polygon.technology/"],
+        blockExplorerUrls: ["https://amoy.polygonscan.com/"],
+      },
+    ]);
+    await provider.send("wallet_switchEthereumChain", [
+      { chainId: chainIdHex },
+    ]);
+  }
+
+  // Request account access only after switching to Polygon Amoy.
   await provider.send("eth_requestAccounts", []);
 
   signer = await provider.getSigner();
