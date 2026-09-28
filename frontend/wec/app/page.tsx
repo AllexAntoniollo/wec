@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from "react";
 import Image from "next/image";
 import { formatUnits, isAddress } from "ethers";
+import { toast } from "sonner";
 import {
   Wallet,
   ArrowRight,
@@ -78,7 +79,6 @@ type PaymentToken = "USDT" | "USDC";
 interface PresaleCardProps {
   account: string | null;
   balances: WalletBalances | null;
-  error: string;
   onConnect: () => Promise<void>;
   onRefreshBalances: () => Promise<void>;
 }
@@ -86,7 +86,6 @@ interface PresaleCardProps {
 const PresaleCard = ({
   account,
   balances,
-  error,
   onConnect,
   onRefreshBalances,
 }: PresaleCardProps) => {
@@ -100,7 +99,6 @@ const PresaleCard = ({
   const [processingAction, setProcessingAction] = useState<
     "approve" | "swap" | null
   >(null);
-  const [transactionError, setTransactionError] = useState("");
   const WEC_PRICE = 0.01;
 
   const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -109,7 +107,6 @@ const PresaleCard = ({
       setWecAmount(val);
       setUsdCost(val === "" ? 0 : Number(val) * WEC_PRICE);
       setSufficientAllowance({ USDT: false, USDC: false });
-      setTransactionError("");
     }
   };
 
@@ -152,7 +149,7 @@ const PresaleCard = ({
       !Number.isFinite(Number(wecAmount)) ||
       Number(wecAmount) <= 0
     ) {
-      setTransactionError("Informe uma quantidade válida de WECR.");
+      toast.error("Enter a valid WECR amount.");
       return;
     }
 
@@ -162,7 +159,6 @@ const PresaleCard = ({
     }
 
     setProcessing(currency);
-    setTransactionError("");
     try {
       const requiredAmount = await getRequiredPaymentAmount(wecAmount);
       const tokenAddress = TOKEN_ADDRESSES[currency];
@@ -175,6 +171,9 @@ const PresaleCard = ({
       if (allowance < requiredAmount) {
         setProcessingAction("approve");
         await approve(tokenAddress, PRESALE_ADDRESS, requiredAmount);
+        toast.success(
+          `${currency} approval complete. Click again to purchase.`,
+        );
         const updatedAllowance = await getAllowance(
           tokenAddress,
           PRESALE_ADDRESS,
@@ -189,16 +188,17 @@ const PresaleCard = ({
 
       setProcessingAction("swap");
       await swap(wecAmount, currency === "USDT");
+      toast.success("Purchase completed successfully.");
       setSufficientAllowance((current) => ({
         ...current,
         [currency]: false,
       }));
       await onRefreshBalances();
     } catch (purchaseError) {
-      setTransactionError(
+      toast.error(
         purchaseError instanceof Error
           ? purchaseError.message
-          : "A transação falhou. Tente novamente.",
+          : "The transaction failed. Please try again.",
       );
     } finally {
       setProcessing(null);
@@ -357,12 +357,6 @@ const PresaleCard = ({
           ))}
         </div>
 
-        {(transactionError || error) && (
-          <p role="alert" className="mt-3 text-center text-sm text-red-600">
-            {transactionError || error}
-          </p>
-        )}
-
         <p className="text-center text-xs text-gray-400 mt-5">
           {account
             ? "Transactions on the Polygon network"
@@ -467,7 +461,6 @@ const DebtManagement = ({
   const [processingAction, setProcessingAction] = useState<
     "approve" | "payDebt" | null
   >(null);
-  const [error, setError] = useState("");
 
   useEffect(() => {
     if (!account) {
@@ -483,10 +476,10 @@ const DebtManagement = ({
       })
       .catch((debtError) => {
         if (isCurrent) {
-          setError(
+          toast.error(
             debtError instanceof Error
               ? debtError.message
-              : "Não foi possível consultar a dívida.",
+              : "Unable to retrieve the debt balance.",
           );
         }
       })
@@ -544,14 +537,13 @@ const DebtManagement = ({
       !Number.isFinite(Number(paymentAmount)) ||
       Number(paymentAmount) <= 0
     ) {
-      setError("Informe um valor válido para pagar.");
+      toast.error("Enter a valid payment amount.");
       return;
     }
 
     if (!account) return;
 
     setProcessing(currency);
-    setError("");
     try {
       const tokenAddress = TOKEN_ADDRESSES[currency];
       const amount = await parseTokenAmount(tokenAddress, paymentAmount);
@@ -564,6 +556,7 @@ const DebtManagement = ({
       if (allowance < amount) {
         setProcessingAction("approve");
         await approve(tokenAddress, PRESALE_ADDRESS, amount);
+        toast.success(`${currency} approval complete.`);
         const updatedAllowance = await getAllowance(
           tokenAddress,
           PRESALE_ADDRESS,
@@ -578,15 +571,16 @@ const DebtManagement = ({
 
       setProcessingAction("payDebt");
       await payDebt(paymentAmount, currency === "USDT");
+      toast.success("Debt payment completed successfully.");
       setPaymentAmount("");
       setAllowances({ USDT: false, USDC: false });
       onRefreshDebt();
       await onRefreshBalances();
     } catch (paymentError) {
-      setError(
+      toast.error(
         paymentError instanceof Error
           ? paymentError.message
-          : "Não foi possível pagar a dívida.",
+          : "Unable to pay the debt.",
       );
     } finally {
       setProcessing(null);
@@ -629,7 +623,6 @@ const DebtManagement = ({
           value={paymentAmount}
           onChange={(event) => {
             setPaymentAmount(event.target.value);
-            setError("");
           }}
           placeholder="0.00"
           className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 text-sm text-black focus:border-transparent focus:outline-none focus:ring-2 focus:ring-black"
@@ -665,11 +658,6 @@ const DebtManagement = ({
             </button>
           ))}
         </div>
-        {error && (
-          <p role="alert" className="mt-2 text-xs text-red-600">
-            {error}
-          </p>
-        )}
       </div>
     </>
   );
@@ -689,35 +677,33 @@ const FreeWalletWithdraw = ({
   const [to, setTo] = useState("");
   const [amount, setAmount] = useState("");
   const [processing, setProcessing] = useState(false);
-  const [error, setError] = useState("");
 
   useEffect(() => {
     setTo(account ?? "");
     setAmount("");
-    setError("");
   }, [account]);
 
   const handleWithdraw = async () => {
     const destination = to.trim();
 
     if (!isAddress(destination)) {
-      setError("Please enter a valid destination address.");
+      toast.error("Please enter a valid destination address.");
       return;
     }
     if (!amount || !Number.isFinite(Number(amount)) || Number(amount) <= 0) {
-      setError("Please enter a valid WECR amount.");
+      toast.error("Please enter a valid WECR amount.");
       return;
     }
 
     setProcessing(true);
-    setError("");
     try {
       await freeWithdraw(destination, amount);
+      toast.success("WECR withdrawal completed.");
       setAmount("");
       onRefreshDebt();
       await onRefreshBalances();
     } catch (withdrawError) {
-      setError(
+      toast.error(
         withdrawError instanceof Error
           ? withdrawError.message
           : "Withdrawal failed. Please try again.",
@@ -772,17 +758,6 @@ const FreeWalletWithdraw = ({
             />
           </div>
         </div>
-
-        {error && (
-          <div
-            role="alert"
-            className="rounded-lg border border-red-100 bg-red-50 p-2"
-          >
-            <p className="text-center text-xs font-medium text-red-600">
-              {error}
-            </p>
-          </div>
-        )}
 
         <button
           type="button"
@@ -943,23 +918,22 @@ const Footer = () => (
 export default function App() {
   const [account, setAccount] = useState<string | null>(null);
   const [balances, setBalances] = useState<WalletBalances | null>(null);
-  const [walletError, setWalletError] = useState("");
   const [debtRefreshKey, setDebtRefreshKey] = useState(0);
 
   const handleConnect = async () => {
     try {
-      setWalletError("");
       const wallet = await connectWallet();
       if (wallet.chainId !== 80002) {
-        throw new Error("Mude a carteira para a rede Polygon Amoy.");
+        throw new Error("Switch your wallet to the Polygon Amoy network.");
       }
       setAccount(wallet.address);
       setBalances(await getWalletBalances(wallet.address));
+      toast.success("Wallet connected successfully.");
     } catch (connectionError) {
-      setWalletError(
+      toast.error(
         connectionError instanceof Error
           ? connectionError.message
-          : "Não foi possível conectar a carteira.",
+          : "Unable to connect the wallet.",
       );
     }
   };
@@ -979,7 +953,6 @@ export default function App() {
         <Hero
           account={account}
           balances={balances}
-          error={walletError}
           onConnect={handleConnect}
           onRefreshBalances={handleRefreshBalances}
         />

@@ -28,7 +28,7 @@ let signer: ethers.JsonRpcSigner | undefined;
 
 export async function connectWallet() {
   if (!window.ethereum) {
-    throw new Error("Nenhuma wallet encontrada. Instale a MetaMask.");
+    throw new Error("No wallet found. Please install MetaMask.");
   }
 
   provider = new ethers.BrowserProvider(window.ethereum);
@@ -44,16 +44,16 @@ export async function connectWallet() {
 }
 
 async function ensureAmoyNetwork() {
-  if (!provider) throw new Error("Conecte a wallet primeiro.");
+  if (!provider) throw new Error("Connect your wallet first.");
   const { chainId } = await provider.getNetwork();
   if (Number(chainId) !== AMOY_CHAIN_ID) {
-    throw new Error("Mude a carteira para a rede Polygon Amoy.");
+    throw new Error("Switch your wallet to the Polygon Amoy network.");
   }
 }
 
 async function getAccount(owner?: string) {
   if (owner) return owner;
-  if (!signer) throw new Error("Conecte a wallet primeiro.");
+  if (!signer) throw new Error("Connect your wallet first.");
   return signer.getAddress();
 }
 
@@ -98,14 +98,14 @@ export async function getRequiredPaymentAmount(wecrAmount: string) {
 
   const amountInWecr = ethers.parseUnits(wecrAmount, 18);
   if (amountInWecr <= BigInt(0))
-    throw new Error("Informe uma quantidade maior que zero.");
+    throw new Error("Enter an amount greater than zero.");
 
   const presale = new ethers.Contract(PRESALE_ADDRESS, presaleAbi, provider);
   const price = (await presale.price()) as bigint;
   const paymentAmount =
     (amountInWecr * price + WECR_UNIT - BigInt(1)) / WECR_UNIT;
   if (paymentAmount <= BigInt(0)) {
-    throw new Error("A quantidade informada é muito baixa para a compra.");
+    throw new Error("The entered amount is too low to purchase.");
   }
 
   return paymentAmount;
@@ -147,7 +147,7 @@ export async function approve(
   spender: string,
   amount: string | bigint,
 ) {
-  if (!signer) throw new Error("Conecte a wallet primeiro.");
+  if (!signer) throw new Error("Connect your wallet first.");
   await ensureAmoyNetwork();
 
   const token = new ethers.Contract(tokenAddress, erc20Abi, signer);
@@ -167,7 +167,7 @@ export async function approve(
 }
 
 export async function swap(wecrAmount: string, isUsdt: boolean) {
-  if (!signer) throw new Error("Conecte a wallet primeiro.");
+  if (!signer) throw new Error("Connect your wallet first.");
   await ensureAmoyNetwork();
 
   const usAmount = await getRequiredPaymentAmount(wecrAmount);
@@ -178,7 +178,7 @@ export async function swap(wecrAmount: string, isUsdt: boolean) {
   return { hash: tx.hash, status: receipt.status === 1 ? "success" : "failed" };
 }
 export async function freeWithdraw(to: string, amount: string) {
-  if (!signer) throw new Error("Conecte a wallet primeiro.");
+  if (!signer) throw new Error("Connect your wallet first.");
   await ensureAmoyNetwork();
 
   const presale = new ethers.Contract(PRESALE_ADDRESS, presaleAbi, signer);
@@ -207,7 +207,7 @@ export async function debtValue(walletAddress: string) {
   return res;
 }
 export async function payDebt(usAmount: string, isUsdt: boolean) {
-  if (!signer) throw new Error("Conecte a wallet primeiro.");
+  if (!signer) throw new Error("Connect your wallet first.");
   await ensureAmoyNetwork();
 
   const tokenAddress = isUsdt ? TOKEN_ADDRESSES.USDT : TOKEN_ADDRESSES.USDC;
