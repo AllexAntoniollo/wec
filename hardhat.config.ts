@@ -42,6 +42,12 @@ export default defineConfig({
       url: configVariable("POLYGON_RPC_URL"),
       accounts: [configVariable("POLYGON_PRIVATE_KEY")],
     },
+    amoy: {
+      type: "http",
+      chainType: "l1",
+      url: configVariable("AMOY_RPC_URL"),
+      accounts: [configVariable("POLYGON_PRIVATE_KEY")],
+    },
   },
   verify: {
     etherscan: {
